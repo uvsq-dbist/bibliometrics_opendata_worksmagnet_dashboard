@@ -1,0 +1,785 @@
+<html>
+<head>
+<title>
+opendata_worksmagnet_dashboard
+</title>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<!--
+source:312
+-->
+<style>
+table 
+{
+	border-collapse: collapse;
+	border: 1px solid black;
+}
+td 
+{
+	border: 1px solid black;
+	padding: 5px;
+	display: table-cell;
+	vertical-align: top; 
+}
+</style>
+<!--
+<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/F9D5ADC0-1EFE-1947-8B58-B1045B397693/main.js" charset="UTF-8"></script></head>
+-->
+<body>
+<h1>Suivi du travail sur le Works-magnet</h1>
+<div id="test_spot"></div>
+Le <a href='https://works-magnet.esr.gouv.fr/' target='blank'>Works-magnet<a/> est un outil produit par 
+le <a href='https://www.enseignementsup-recherche.gouv.fr/fr' target='blank'>Ministère chargé de 
+l'enseigement supérieur et de la recherche</a> pour nettoyer les données d'affiliation des notices
+bibliographiques de <a href='https://openalex.org/works' target='blank'>OpenAlex</a>. 
+A une affiliation telle qu'elle se trouve dans une publication, il s'agit d'associer le bon numéro ROR de l'institution, et lui uniquement.
+</br>
+</br>
+Une demande se traduit par une <i>issue</i>, mais, attention, une <i>issue</i> peut en fait être constituée d'un ensemble : un ou plusieur ajout de numéros ROR et/ou une ou plusieurs suppressions de numéros ROR
+</br>
+</br>
+La présente page permet le suivi du travail sur le Works-magnet, ie le travail sur les <i>issues</i>
+</br>
+</br>
+A noter : le travail sur le Works-magnet est intégré ici avec un retard de quelques jours
+</br>
+</br>
+<table>
+<tr>
+<td>
+<div id="form_spot"></div>
+</td>
+</tr>
+</table>
+<br/>
+<div id="dashboard_spot" style="display:none">
+<table>
+<tr>
+<td>
+<span id="on"></span>
+/
+<span id="to"></span>
+</td>
+</tr>
+</table>
+</div>
+<div id="date_pov_results_spot" style="display:none">
+</div>
+<div id="organization_pov_results_spot" style="display:none">
+</div>
+<br/>
+<a href='https://www.uvsq.fr/english' target='_blank'>UVSQ</a>
+/
+<a href='https://www.uvsq.fr/dbist' target='_blank'>DBIST</a>
+<script>
+/*
+Six fonctions :
+Au niveau de chaque fonction, quelques informations en plus
+En gros :
+
+>>> launch_function()
+Lancé par le bouton de soumission, lance à son tour get_enseignementsup_recherche_data_function()
+
+>>> get_enseignementsup_recherche_data_function() <= asynchrone
+Va chercher les données dans le point d'entrée https://data.enseignementsup-recherche.gouv.fr/api/explore/v2.1/catalog/datasets/openalex-affiliations-corrections/records
+en actionnant une donnée offset afin de couvrir tous les nombres de réponses possible
+A chaque réponse, actionne can_data_function qui s'applique à la série de réponse renvoyée par la requête
+Après le dernier passage, lancement de launch_ror_function()
+
+>>> can_data_function()
+Stocke les données dans diverses variables
+
+>>> launch_ror_function()
+Lance get_ror_data_function()
+
+>>> get_ror_data_function() <= asynchrone
+Enrichissement par des données récupérées dans le ROR
+Va chercher les données dans le point d'entrée https://api.ror.org/v2/organizations
+Pour éviter une url trop longue, est lancée autant de fois qu'il y a de groupes de d'identifiants ROR
+La taille d'un groupe d'identifiants ROR = chunk_size
+Les labos étant souvent connus par leur acronyme, la logique du nom choisi est : 
+S'il y a un acronyme, on prend le premier qui se présente, s'il n'y en a pas, on prend le nom qui s'affiche
+
+Au dernier passage, lancement de l'affichage par la fonction display_function()
+
+>>> display_function()
+Affichage des résultats
+*/
+
+// variables appelées à ne pas changer
+var current_year=new Date().getFullYear();
+var bottom_year=2024;
+
+var nbr_of_items_per_page=100;// max = 100
+var timeout_time=10; // 
+
+var limit=100;
+
+// variables appelées à changer
+
+var enseignementsup_recherche_counter=0;
+
+var chunk_size=20;
+
+var text="";
+var text_as_array=new Array();
+var start_year="";
+var end_year="";
+
+var all_dates=new Array();
+var date_pov_ordering=new Array();
+var date_pov=new Object();
+var all_statuses=new Array();
+var ror_organization_pov_ordering=new Array();
+var ror_organization_pov=new Object();
+var all_organizations=new Array();
+var chunks_of_organizations=new Array();
+
+var ror_counter=0;
+
+var opendata_worksmagnet_fields=new Array();
+opendata_worksmagnet_fields.push("github_issue_id");
+opendata_worksmagnet_fields.push("github_issue_link");
+opendata_worksmagnet_fields.push("state");// valeurs possible : "open", "closed"
+opendata_worksmagnet_fields.push("date_opened");// AAAA-MM-JJ
+opendata_worksmagnet_fields.push("date_closed");// AAAA-MM-JJ ou null
+opendata_worksmagnet_fields.push("raw_affiliation_name");
+opendata_worksmagnet_fields.push("has_added_rors");
+opendata_worksmagnet_fields.push("has_removed_rors");
+opendata_worksmagnet_fields.push("new_rors");// la situation après la demande de modif. Format = série de rors format court séparés par des ";". Exemle : 05mzd8v39;035j0tq82
+opendata_worksmagnet_fields.push("previous_rors");// la situation avant la demande de modif. Format idem
+opendata_worksmagnet_fields.push("added_rors");// les rors dont on demande l'ajout. Format idem. OU null
+opendata_worksmagnet_fields.push("removed_rors");// les rors dont on demande de retrait. Format idem. OU null
+opendata_worksmagnet_fields.push("openalex_works_examples");
+opendata_worksmagnet_fields.push("contact");
+opendata_worksmagnet_fields.push("contact_domain");
+
+opendata_worksmagnet_state_values=new Array();
+opendata_worksmagnet_state_values.push("open");
+opendata_worksmagnet_state_values.push("closed");
+
+var opendata_worksmagnet_state_values_as_object=new Object();
+for (var j = 0; j < opendata_worksmagnet_state_values.length; j++) 
+{
+	opendata_worksmagnet_state_values_as_object[opendata_worksmagnet_state_values[j]]=0;
+}
+
+// fabrication du formulaire
+
+// input de texte
+document.getElementById("form_spot").innerHTML+="Indiquez le domaine de l'adresse mail des personnes étant intervenu dans le Works-magnet (pour gabriel.martin@abcd.fr, le domaine est 'abcd.fr')&nbsp;:";
+document.getElementById("form_spot").innerHTML+="<br/>";
+document.getElementById("form_spot").innerHTML+="<br/>";
+
+var input=document.createElement("input");
+input.id = "text";
+input.type = "text";
+input.value = "uvsq.fr";
+document.getElementById("form_spot").appendChild(input);
+
+document.getElementById("form_spot").innerHTML+="<br/>";
+document.getElementById("form_spot").innerHTML+="<br/>";
+document.getElementById("form_spot").innerHTML+="(vous pouvez indiquer plusieurs domaines, séparés par un espace)";
+
+var provisional_br=document.createElement("br");
+document.getElementById("form_spot").appendChild(provisional_br);
+provisional_br=document.createElement("br");
+document.getElementById("form_spot").appendChild(provisional_br);
+
+// date de départ
+
+var start_year_selection=document.createElement("select");
+start_year_selection.id = "start_year_selection";
+var i=bottom_year;
+while (i<=current_year)
+{
+	var option = document.createElement("option");
+	option.text = i;
+	option.value = i;
+	start_year_selection.appendChild(option);
+	i++;
+}
+
+var provisional_form_label=document.createElement("label");
+provisional_form_label.for="start_year_selection";
+provisional_form_label.innerHTML="date de début&nbsp;:&nbsp;";
+document.getElementById("form_spot").appendChild(provisional_form_label);
+
+document.getElementById("form_spot").appendChild(start_year_selection);
+
+provisional_br=document.createElement("br");
+document.getElementById("form_spot").appendChild(provisional_br);
+provisional_br=document.createElement("br");
+document.getElementById("form_spot").appendChild(provisional_br);
+
+// date de fin
+var end_year_selection=document.createElement("select");
+end_year_selection.id = "end_year_selection";
+var i=current_year;
+while (i>=bottom_year)
+{
+	var option = document.createElement("option");
+	option.text = i;
+	option.value = i;
+	end_year_selection.appendChild(option);
+	i--;
+}
+
+provisional_form_label=document.createElement("label");
+provisional_form_label.for="start_year_selection";
+provisional_form_label.innerHTML="date de fin&nbsp;:&nbsp;";
+document.getElementById("form_spot").appendChild(provisional_form_label);
+
+document.getElementById("form_spot").appendChild(end_year_selection);
+
+provisional_br=document.createElement("br");
+document.getElementById("form_spot").appendChild(provisional_br);
+provisional_br=document.createElement("br");
+document.getElementById("form_spot").appendChild(provisional_br);
+
+// bouton d'envoi
+input=document.createElement("input");
+input.id = "submission_input";
+input.type = "submit";
+input.onclick = function () 
+{
+	launch_function();
+};
+input.style.display="block";
+document.getElementById("form_spot").appendChild(input);
+
+// fin fabrication du formulaire
+
+function launch_function()
+{
+// Lancé par le bouton de soumission, fait des préparations et 
+// lance à son tour get_enseignementsup_recherche_data_function()
+
+// purge
+	running_id=0;
+	text="";
+	text_as_array=new Array();
+	start_year="";
+	end_year="";
+	all_dates=new Array();
+	date_pov_ordering=new Array();
+	date_pov=new Object();
+	all_statuses=new Array();
+	ror_organization_pov_ordering=new Array();
+	ror_organization_pov=new Object();
+	all_organizations=new Array();
+	chunks_of_organizations=new Array();
+	ror_counter=0;
+	enseignementsup_recherche_counter=0;
+	document.getElementById("on").innerHTML="";
+	document.getElementById("to").innerHTML="";
+	document.getElementById("dashboard_spot").style.display="none";		
+	document.getElementById("date_pov_results_spot").innerHTML="";	
+	document.getElementById("date_pov_results_spot").style.display="none";	
+	document.getElementById("organization_pov_results_spot").innerHTML="";	
+	document.getElementById("organization_pov_results_spot").style.display="none";	
+	document.getElementById("submission_input").style.display="none";	
+
+	text=document.getElementById("text").value;
+	text=text.trim();
+	if (text=="")
+	{
+		text="*";
+	}
+	else
+	{
+		while (text.indexOf("  ")!==-1)
+		{
+			text = text.replaceAll("  "," ");
+		}		
+	}
+	text_as_array=text.split(" ");
+	start_year=document.getElementById("start_year_selection").value;
+	end_year=document.getElementById("end_year_selection").value;
+	get_enseignementsup_recherche_data_function(0);
+}
+
+function launch_ror_function()
+{
+// Enrichissement ror
+// Si pas d'organisations repérées
+	if (all_organizations.length==0)
+	{
+// lancement de l'affichage
+		display_function();
+	}
+	else
+	{
+// on éclate la liste des organizations (all_organizations) en 
+// chunks (chunks_of_organizations)
+		var provisional_chunk=new Array();
+		for (var i = 0; i < all_organizations.length; i++) 
+		{
+			provisional_chunk.push(all_organizations[i]);
+			if (provisional_chunk.length==chunk_size)
+			{
+				chunks_of_organizations.push(provisional_chunk);
+				provisional_chunk=new Array();
+			}
+		}
+		if (provisional_chunk.length!=0)
+		{
+			chunks_of_organizations.push(provisional_chunk);
+		}
+// On lance autant de get_ror_data_function() que de chunks
+		for (var j = 0; j < chunks_of_organizations.length; j++) 
+		{
+			get_ror_data_function(j);
+		}
+	}
+}
+
+async function get_ror_data_function(level)
+{
+// Ramassage des données ror
+
+// on nourrit ror_organization_pov_ordering
+	var ror_url="";
+	ror_url+="https://api.ror.org/v2/organizations?query.advanced=id:(";
+	for (var j = 0; j < chunks_of_organizations[level].length; j++) 
+	{
+		if (j!=0)
+		{
+			ror_url+="+OR+";
+		}
+		ror_url+="https%5C%3A%5C%2F%5C%2Fror.org%5C%2F"+chunks_of_organizations[level][j];
+	}
+	ror_url+=")";
+	var ror_response="";
+	try 
+	{
+		ror_response = await fetch(ror_url);
+	} 
+	catch  
+	{
+		alert("Problème sur l'API ROR. Erreur #"+ror_response.status);
+		location.reload();
+	}
+// Uses the 'optional chaining' operator
+	if (ror_response?.ok) 
+	{
+		let ror_response_as_json;
+		try 
+		{
+			ror_response_as_json = await ror_response.json();
+		}
+		catch  
+		{
+			alert("Problème sur l'API ROR");
+			location.reload();
+		}
+
+		if (ror_response_as_json!="") 
+		{
+			for (var j = 0; j < ror_response_as_json["items"].length; j++) 
+			{
+				var provisional_acronym="";
+				var provisional_display_name="";
+				var provisional_final_name="";
+// s'il y a un acronyme, on prend le premier qui se présente
+// s'il n'y en a pas, on prend le nom qui s'affiche
+				for (var l = 0; l < ror_response_as_json["items"][j]["names"].length; l++) 
+				{
+					var ror_flag=0;
+					for (var m = 0; m < ror_response_as_json["items"][j]["names"][l]["types"].length; m++) 
+					{
+						if(ror_response_as_json["items"][j]["names"][l]["types"][m]=="acronym")
+						{
+							if (provisional_acronym=="")
+							{
+								provisional_acronym=ror_response_as_json["items"][j]["names"][l]["value"];
+							}
+						}
+						if(ror_response_as_json["items"][j]["names"][l]["types"][m]=="label")
+						{
+							ror_flag++;
+						}
+						if(ror_response_as_json["items"][j]["names"][l]["types"][m]=="ror_display")
+						{
+							ror_flag++;
+						}
+						if (ror_flag>=2)
+						{
+							provisional_display_name=ror_response_as_json["items"][j]["names"][l]["value"];
+						}
+					}
+				}
+				provisional_final_name=provisional_acronym;
+				if (provisional_final_name=="")
+				{
+					provisional_final_name=provisional_display_name;
+				}
+				ror_organization_pov_ordering.push({"id":ror_response_as_json["items"][j]["id"],"name":provisional_final_name});
+			}
+// décompte des passages terminés
+			ror_counter++;
+// si on arrive à la fin
+			if (ror_counter==chunks_of_organizations.length)
+			{
+// sort par nom
+				ror_organization_pov_ordering.sort((a,b) => (a.name > b.name) ? 1 : ((b.name > a.name) ? -1 : 0));
+// lancement de l'affichage
+				display_function();
+			}
+		}
+	}
+}
+
+
+async function get_enseignementsup_recherche_data_function(offset)
+{
+// Lancé par le bouton de soumission
+// Fonction récurente avec fabrication d'un offset à partir de la
+// donnée offset tant qu'on est en dessous du nombre de réponses
+// A chaque récurence, on lance can_data_function() pour stocker les 
+// données intéressantes
+	var response="";
+	try 
+	{
+		var enseignementsup_recherche_url="https://data.enseignementsup-recherche.gouv.fr/api/explore/v2.1/catalog/datasets/openalex-affiliations-corrections/records?select=";
+		for (var i = 0; i < opendata_worksmagnet_fields.length; i++) 
+		{
+			if (i!=0)
+			{
+				enseignementsup_recherche_url+=",";
+			}
+			enseignementsup_recherche_url+=opendata_worksmagnet_fields[i];
+		}		
+		enseignementsup_recherche_url+="&limit=";
+		enseignementsup_recherche_url+=limit;
+		enseignementsup_recherche_url+="&offset=";
+		enseignementsup_recherche_url+=offset;
+		enseignementsup_recherche_url+="&order_by=github_issue_id";
+		enseignementsup_recherche_url+="&where=";
+		enseignementsup_recherche_url+="(";
+		for (var i = 0; i < text_as_array.length; i++) 
+		{
+			if (i!=0)
+			{
+				enseignementsup_recherche_url+=" OR ";
+			}
+			enseignementsup_recherche_url+="contact_domain like '"+text_as_array[i]+"'";
+		}		
+		enseignementsup_recherche_url+=")";
+
+		enseignementsup_recherche_url+=" AND date_opened >= '";
+		enseignementsup_recherche_url+=start_year;
+		enseignementsup_recherche_url+="-01-01'";
+		enseignementsup_recherche_url+=" AND date_opened <= '";
+		enseignementsup_recherche_url+=end_year;
+		enseignementsup_recherche_url+="-12-31'";
+
+		response = await fetch(enseignementsup_recherche_url);
+	} 
+	catch  
+	{
+		alert("Problème sur l'API data.enseignementsup-recherche.gouv.fr. Erreur #"+response.status);
+		location.reload();
+	}
+// Uses the 'optional chaining' operator
+	if (response?.ok) 
+	{
+		let response_as_text;
+		try 
+		{
+			response_as_text = await response.text();
+		}
+		catch  
+		{
+			alert("Problème sur l'API data.enseignementsup-recherche.gouv.fr");
+			location.reload();
+		}
+		if (response_as_text!="") 
+		{
+			var response_as_object = JSON.parse(response_as_text);
+			if (response_as_object["results"].length!=0)
+			{
+
+// si premier passage
+				if (offset==0)
+				{
+					document.getElementById("to").innerHTML=response_as_object["total_count"];
+					document.getElementById("dashboard_spot").style.display="block";	
+				}
+				can_data_function(response_as_object["results"]);
+// renvoit le offset suivant, si on n'est pas arrivé à une certaine
+// limite
+				if ((offset+limit)<Number(response_as_object["total_count"]))
+				{
+					offset=offset+limit;
+// on ralenti le code			
+					await new Promise(r => setTimeout(r, timeout_time));
+					document.getElementById("on").innerHTML=Number(document.getElementById("on").innerHTML)+response_as_object["results"].length;	
+					get_enseignementsup_recherche_data_function(offset);
+				}
+// décompte des passages terminés
+				enseignementsup_recherche_counter++;
+				
+// si on en est au dernier passage
+				if (enseignementsup_recherche_counter==Math.ceil(response_as_object["total_count"]/limit))
+				{
+/*
+// on éclate la liste des organizations (all_organizations) en 
+// chunks (chunks_of_organizations)
+					var provisional_chunk=new Array();
+					for (var i = 0; i < all_organizations.length; i++) 
+					{
+						provisional_chunk.push(all_organizations[i]);
+						if (provisional_chunk.length==chunk_size)
+						{
+							chunks_of_organizations.push(provisional_chunk);
+							provisional_chunk=new Array();
+						}
+					}
+					if (provisional_chunk.length!=0)
+					{
+						chunks_of_organizations.push(provisional_chunk);
+					}
+*/
+// on lance la partie ror
+					launch_ror_function();
+				}
+			}
+// cas de zéro réponse
+			else
+			{
+				if (response_as_object["total_count"]==0)
+				{
+					var provisional_table=document.createElement("table");
+					var provisional_tr=document.createElement("tr");
+					var provisional_td=document.createElement("td");
+					provisional_td.innerHTML="Zéro réponse";
+					provisional_tr.appendChild(provisional_td);
+					provisional_table.appendChild(provisional_tr);
+					provisional_table.appendChild(provisional_tr);
+					document.getElementById("date_pov_results_spot").appendChild(provisional_table);
+					document.getElementById("date_pov_results_spot").style.display="block";	
+					document.getElementById("submission_input").style.display="block";	
+				}
+			}
+		}
+	}
+	else
+	{
+	}
+}
+
+function can_data_function(one_array_of_responses)
+{
+// Cette fonction stocke les données de data.enseignementsup-recherche.gouv.fr
+// Elle les stocke dans
+// - all_statuses
+// - all_dates
+// - all_organizations
+// - date_pov
+// - ror_organization_pov
+
+	for (var i = 0; i < one_array_of_responses.length; i++) 
+	{
+// si status jamais rencontré
+		if (all_statuses.indexOf(one_array_of_responses[i]["state"])==-1)
+		{
+			all_statuses.push(one_array_of_responses[i]["state"]);
+		}
+// si date jamais rencontrée
+		if (all_dates.indexOf(one_array_of_responses[i]["date_opened"].substring(0,7))==-1)
+		{
+			all_dates.push(one_array_of_responses[i]["date_opened"].substring(0,7));
+			date_pov[one_array_of_responses[i]["date_opened"].substring(0,7)]={"open":0,"closed":0};
+		}
+
+		date_pov[one_array_of_responses[i]["date_opened"].substring(0,7)][one_array_of_responses[i]["state"]]=Number(date_pov[one_array_of_responses[i]["date_opened"].substring(0,7)][one_array_of_responses[i]["state"]])+1;
+// state = closed
+		if (one_array_of_responses[i]["state"]=="closed")
+		{
+			if (one_array_of_responses[i]["added_rors"] != null)
+			{
+				var provisional_organizations = one_array_of_responses[i]["added_rors"].split(";");
+				for (var j = 0; j < provisional_organizations.length; j++) 
+				{
+					if (all_organizations.indexOf(provisional_organizations[j])==-1)
+					{
+						all_organizations.push(provisional_organizations[j]);
+						if (ror_organization_pov[provisional_organizations[j]]===undefined)
+						{
+							ror_organization_pov[provisional_organizations[j]]=new Object();
+						}
+						if (ror_organization_pov[provisional_organizations[j]].added===undefined)
+						{
+							ror_organization_pov[provisional_organizations[j]].added=0;
+						}
+					}
+					ror_organization_pov[provisional_organizations[j]].added=Number(ror_organization_pov[provisional_organizations[j]].added)+1;
+				}
+			}
+			if (one_array_of_responses[i]["removed_rors"] != null)
+			{
+				var provisional_organizations = one_array_of_responses[i]["removed_rors"].split(";");
+				for (var j = 0; j < provisional_organizations.length; j++) 
+				{
+					if (all_organizations.indexOf(provisional_organizations[j])==-1)
+					{
+						all_organizations.push(provisional_organizations[j]);
+						if (ror_organization_pov[provisional_organizations[j]]===undefined)
+						{
+							ror_organization_pov[provisional_organizations[j]]=new Object();
+						}
+						if (ror_organization_pov[provisional_organizations[j]].removed===undefined)
+						{
+							ror_organization_pov[provisional_organizations[j]].removed=0;
+						}
+					}
+					ror_organization_pov[provisional_organizations[j]]["removed"]=Number(ror_organization_pov[provisional_organizations[j]]["removed"])+1;
+				}
+			}
+		}
+	}
+}
+
+function display_function()
+{
+// Fonction d'affichage
+
+// purge
+	document.getElementById("on").innerHTML="";
+	document.getElementById("to").innerHTML="";
+	document.getElementById("dashboard_spot").style.display="none";		
+	all_dates.reverse();
+// premier tableau, celui des issues
+	var provisional_table=document.createElement("table");
+// première ligne d'en-tête
+	var provisional_tr=document.createElement("tr");
+	var provisional_td=document.createElement("td");
+	var provisional_bit=all_statuses.length+1;
+	provisional_bit=provisional_bit.toString();
+	provisional_td.setAttribute("colspan", provisional_bit);
+	provisional_td.innerHTML="issues";
+	provisional_tr.appendChild(provisional_td);
+	provisional_table.appendChild(provisional_tr);
+// seconde ligne d'en-tête
+	var provisional_tr=document.createElement("tr");
+	var provisional_td=document.createElement("td");
+	provisional_td.innerHTML="mois";
+	provisional_tr.appendChild(provisional_td);
+	provisional_table.appendChild(provisional_tr);
+	for (var j = 0; j < all_statuses.length; j++) 
+	{
+		var provisional_td=document.createElement("td");
+		provisional_td.innerHTML=all_statuses[j];
+		provisional_tr.appendChild(provisional_td);
+		provisional_table.appendChild(provisional_tr);
+	}
+// table proper
+	for (var i = 0; i < all_dates.length; i++) 
+	{
+		var provisional_tr=document.createElement("tr");
+		var provisional_td=document.createElement("td");
+		provisional_td.innerHTML=all_dates[i];
+		provisional_tr.appendChild(provisional_td);
+		provisional_table.appendChild(provisional_tr);
+		for (var j = 0; j < all_statuses.length; j++) 
+		{
+			var provisional_td=document.createElement("td");
+			provisional_td.innerHTML=date_pov[all_dates[i]][all_statuses[j]];
+			provisional_tr.appendChild(provisional_td);
+			provisional_table.appendChild(provisional_tr);
+		}
+	}
+	document.getElementById("date_pov_results_spot").innerHTML+="<h2>Suivi par mois</h2>";
+	document.getElementById("date_pov_results_spot").innerHTML+="closed = pris en compte par les équipes d'OpenAlex / ";
+	document.getElementById("date_pov_results_spot").innerHTML+="open = non (ou pas encore) pris en compte par les équipes d'OpenAlex. ";
+	document.getElementById("date_pov_results_spot").innerHTML+="<br/>";
+	document.getElementById("date_pov_results_spot").innerHTML+="<br/>";
+	document.getElementById("date_pov_results_spot").appendChild(provisional_table);
+	document.getElementById("date_pov_results_spot").style.display="block";	
+
+	var provisional_br=document.createElement("br");
+	document.getElementById("organization_pov_results_spot").appendChild(provisional_br);
+	provisional_br=document.createElement("br");
+	document.getElementById("organization_pov_results_spot").appendChild(provisional_br);
+
+// second tableau, celui des affiliations
+	if (all_organizations.length!=0)
+	{
+		var provisional_table=document.createElement("table");
+// première ligne d'en-tête
+		var provisional_tr=document.createElement("tr");
+		var provisional_td=document.createElement("td");
+		provisional_td.setAttribute("colspan", 3);
+		provisional_td.innerHTML="organizations";
+		provisional_tr.appendChild(provisional_td);
+		provisional_table.appendChild(provisional_tr);
+// seconde ligne d'en-tête
+		var provisional_tr=document.createElement("tr");
+		var provisional_td=document.createElement("td");
+		provisional_td.innerHTML="nom";
+		provisional_tr.appendChild(provisional_td);
+		var provisional_td=document.createElement("td");
+		provisional_td.innerHTML="added";
+		provisional_tr.appendChild(provisional_td);
+		provisional_tr.appendChild(provisional_td);
+		var provisional_td=document.createElement("td");
+		provisional_td.innerHTML="removed";
+		provisional_tr.appendChild(provisional_td);
+		provisional_table.appendChild(provisional_tr);
+// table proper
+		for (var i = 0; i < ror_organization_pov_ordering.length; i++) 
+		{
+			var provisional_tr=document.createElement("tr");
+			var provisional_td=document.createElement("td");
+			var provisional_a=document.createElement("a");
+			provisional_a.setAttribute("href", ror_organization_pov_ordering[i]["id"]);
+			provisional_a.setAttribute("target", "blank");
+			provisional_a.innerHTML=ror_organization_pov_ordering[i]["name"];
+			provisional_td.appendChild(provisional_a);
+			provisional_tr.appendChild(provisional_td);
+			var provisional_td=document.createElement("td");
+			var provisional_id="";
+			provisional_id=ror_organization_pov_ordering[i]["id"].substring("https://ror.org/".length);
+			if (ror_organization_pov[provisional_id]["added"] == null || ror_organization_pov[provisional_id]["added"]==undefined || isNaN(ror_organization_pov[provisional_id]["added"]))
+			{
+				provisional_td.innerHTML=0;
+			}
+			else
+			{
+				provisional_td.innerHTML=ror_organization_pov[provisional_id]["added"];
+			}
+			provisional_tr.appendChild(provisional_td);
+			var provisional_td=document.createElement("td");
+			if (ror_organization_pov[provisional_id]["removed"] == null || ror_organization_pov[provisional_id]["removed"]==undefined || isNaN(ror_organization_pov[provisional_id]["removed"]))
+			{
+				provisional_td.innerHTML=0;
+			}
+			else
+			{
+				provisional_td.innerHTML=ror_organization_pov[provisional_id]["removed"];
+			}
+			provisional_tr.appendChild(provisional_td);
+			provisional_table.appendChild(provisional_tr);
+		}
+
+		document.getElementById("organization_pov_results_spot").innerHTML+="<h2>Suivi par organization</h2>";
+		document.getElementById("organization_pov_results_spot").innerHTML+="Ce tableau ne reprend que les <i>issues</i> prises en ";
+		document.getElementById("organization_pov_results_spot").innerHTML+="compte par les équipes d'OpenAlex (les <i>issues</i> 'closed')";
+		document.getElementById("organization_pov_results_spot").innerHTML+="<br/>";
+		document.getElementById("organization_pov_results_spot").innerHTML+="<br/>";
+		document.getElementById("organization_pov_results_spot").innerHTML+="A noter : toutes les demandes d'ajout (les 'added') ou de retrait (les 'removed') que constitue une telle <i>issue</i> ";
+		document.getElementById("organization_pov_results_spot").innerHTML+="n'ont pas forcément été intégrées dans OpenAlex. En somme, il s'agit ici d'un suivi des demandes, ";
+		document.getElementById("organization_pov_results_spot").innerHTML+="pas des demandes <i>agréées</i>";
+		document.getElementById("organization_pov_results_spot").innerHTML+="<br/>";
+		document.getElementById("organization_pov_results_spot").innerHTML+="<br/>";
+		document.getElementById("organization_pov_results_spot").appendChild(provisional_table);
+	}
+
+	document.getElementById("submission_input").style.display="block";	
+	document.getElementById("organization_pov_results_spot").style.display="block";	
+}
+
+</script>
+</body>
+</html>
